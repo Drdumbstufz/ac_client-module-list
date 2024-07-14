@@ -1,0 +1,262 @@
+#include <iostream>
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <tchar.h>
+#include <stdio.h>
+#include <psapi.h>
+#include <vector>
+
+HANDLE hProc = NULL;
+PROCESSENTRY32 pe32;
+
+void printError(TCHAR const* msg)
+{
+    _ftprintf(stderr, TEXT("%s\n"), msg);
+}
+
+bool EnableDebugPrivilege() {
+    HANDLE hToken;
+    TOKEN_PRIVILEGES tokenPrivileges;
+
+    // Open the process token
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        std::cerr << "OpenProcessToken failed: " << GetLastError() << std::endl;
+        return false;
+    }
+
+    // Lookup the privilege value
+    if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &tokenPrivileges.Privileges[0].Luid)) {
+        std::cerr << "LookupPrivilegeValue failed: " << GetLastError() << std::endl;
+        CloseHandle(hToken);
+        return false;
+    }
+
+    tokenPrivileges.PrivilegeCount = 1;  // One privilege to set
+    tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    // Adjust token privileges
+    if (!AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges, sizeof(TOKEN_PRIVILEGES), NULL, NULL)) {
+        std::cerr << "AdjustTokenPrivileges failed: " << GetLastError() << std::endl;
+        CloseHandle(hToken);
+        return false;
+    }
+
+    if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+        std::cerr << "The token does not have the specified privilege." << std::endl;
+        CloseHandle(hToken);
+        return false;
+    }
+
+    CloseHandle(hToken);
+    return true;
+}
+
+char* ConvertAndCall(WCHAR* WideStr)
+{
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, WideStr, -1, NULL, 0, NULL, NULL);
+    char* narrowStr = new char[size_needed];
+    WideCharToMultiByte(CP_UTF8, 0, WideStr, -1, narrowStr, size_needed, NULL, NULL);
+    return narrowStr;
+}
+
+DWORD GetProcList(const char* Process_Name)
+{
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE)
+    {
+        std::cout << "ERROR: Failed to create snapshot of processes." << std::endl;
+        printError(TEXT("CreateToolhelp32Snapshot (of processes)"));
+        DWORD dwError = GetLastError();
+        std::cout << "LastError code: " << dwError << std::endl;
+        return 0;
+    }
+
+    pe32.dwSize = sizeof(PROCESSENTRY32);
+
+    if (!Process32First(hSnap, &pe32))
+    {
+        std::cout << "ERROR: Failed to retrieve the first process information." << std::endl;
+        DWORD dwError = GetLastError();
+        std::cout << "LastError code: " << dwError << std::endl;
+        CloseHandle(hSnap);
+        return 0;
+    }
+
+    DWORD foundProcID = 0;
+    bool found = false;
+    std::cout << "Processes Found:" << std::endl;
+    do
+    {
+        std::cout << "PID: " << pe32.th32ProcessID << std::endl;
+        _tprintf(TEXT("pName: %s\n"), pe32.szExeFile);
+        std::cout << "" << std::endl;
+
+        char* narrowStr = ConvertAndCall(pe32.szExeFile);
+
+        // Compare process names
+        if (strcmp(Process_Name, narrowStr) == 0)
+        {
+            std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+            std::cout << "                                  Process: " << Process_Name << " found" << std::endl;
+            std::cout << "                                  Process ID: " << pe32.th32ProcessID << std::endl;
+            std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+            std::cout << "" << std::endl;
+
+            DWORD ProcID = pe32.th32ProcessID;
+            hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, ProcID);
+            if (hProc == NULL)
+            {
+                if (EnableDebugPrivilege()) {
+                    std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+                    std::cout << "Debug privilege enabled successfully." << std::endl;
+                    std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+                    std::cout << "" << std::endl;
+
+                    // Open a process with PROCESS_ALL_ACCESS rights
+                    hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, ProcID);
+                    if (hProc == NULL) {
+                        std::cerr << "Failed to open process: " << GetLastError() << std::endl;
+                        std::cout << "" << std::endl;
+                    }
+                    else {
+                        std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+                        std::cout << "Process opened successfully with PROCESS_ALL_ACCESS." << std::endl;
+                        std::cout << "|--------------------------------------------------------------------------------------------|" << std::endl;
+                        std::cout << "" << std::endl;
+                    }
+                }
+                else {
+                    std::cout << "Failed to enable debug privilege." << std::endl;
+                    std::cout << "" << std::endl;
+                }
+            }
+
+            found = true;
+            foundProcID = ProcID; // Save the found process ID
+        }
+
+        delete[] narrowStr; // Free allocated memory
+    } while (Process32Next(hSnap, &pe32));
+
+    if (!found)
+    {
+        std::cout << "Process not found: " << Process_Name << std::endl;
+        std::cout << "Note: This Program is case-sensitive" << std::endl;
+    }
+
+    CloseHandle(hSnap);
+    return foundProcID; // Return the found process ID
+}
+
+//https://pastebin.com/LdDqc0Tw
+//Code from PasteBin
+DWORD GetModuleBaseAddress(const TCHAR* lpszModuleName, DWORD pID) {
+    DWORD dwModuleBaseAddress = 0;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pID); // make snapshot of all modules within process
+    MODULEENTRY32 ModuleEntry32 = { 0 };
+    ModuleEntry32.dwSize = sizeof(MODULEENTRY32);
+
+    if (Module32First(hSnapshot, &ModuleEntry32)) //store first Module in ModuleEntry32
+    {
+        do {
+            if (_tcscmp(ModuleEntry32.szModule, lpszModuleName) == 0) // if Found Module matches Module we look for -> done!
+            {
+                std::cout << "Module: [ac_client.exe] found" << std::endl;
+                std::cout << "PID: " << pID << std::endl;
+                dwModuleBaseAddress = (DWORD)ModuleEntry32.modBaseAddr;
+                break;
+            }
+        } while (Module32Next(hSnapshot, &ModuleEntry32)); // walk Module entries in Snapshot and store in ModuleEntry32
+    }
+    else
+    {
+        std::cout << "Could not store Module in ModuleEntry32" << std::endl;
+    }
+    CloseHandle(hSnapshot);
+    return dwModuleBaseAddress;
+}
+//Code from PasteBin
+DWORD GetPointerAddress(HWND hwnd, DWORD gameBaseAddr, DWORD address, std::vector<DWORD> offsets)
+{
+    DWORD pID = NULL; // Game process ID
+    GetWindowThreadProcessId(hwnd, &pID);
+    HANDLE phandle = NULL;
+    phandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pID);
+    if (phandle == INVALID_HANDLE_VALUE || phandle == NULL);
+ 
+    DWORD offset_null = NULL;
+    ReadProcessMemory(phandle, (LPVOID*)(gameBaseAddr + address), &offset_null, sizeof(offset_null), 0);
+    DWORD pointeraddress = offset_null; // the address we need
+    for (int i = 0; i < offsets.size() - 1; i++) // we don't want to change the last offset value so we do -1
+    {
+        ReadProcessMemory(phandle, (LPVOID*)(pointeraddress + offsets.at(i)), &pointeraddress, sizeof(pointeraddress), 0);
+    }
+    return pointeraddress += offsets.at(offsets.size() - 1); // adding the last offset
+}
+
+void ExploitProcessBuffer(DWORD foundProcID)
+{
+    DWORD BaseAddress = GetModuleBaseAddress(_T("ac_client.exe"), foundProcID);
+
+    //Ammo
+    DWORD HealthAdr = 0x010F4F4;
+    std::vector<DWORD> HealthOffsets{ 0xF8 };
+
+    HWND hwnd = FindWindowA(NULL, "AssaultCube");
+    DWORD HealthPtr = GetPointerAddress(hwnd, BaseAddress, HealthAdr, HealthOffsets);
+
+    
+    while (true)
+    {
+        int Health = 1000;
+        WriteProcessMemory(hProc, (LPVOID*)(HealthPtr), &Health, sizeof(Health), 0);
+    }
+}
+
+int PrintModules(DWORD processID)
+{
+    HMODULE hMods[1024];
+    DWORD cbNeeded;
+    unsigned int i;
+
+    printf("\n Modules of Process ID: %u\n", processID);
+
+    hProc = OpenProcess(PROCESS_QUERY_INFORMATION |
+        PROCESS_VM_READ,
+        FALSE, processID);
+
+    if (NULL == hProc)
+        return 1;
+    //Get Modules List
+    if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded))
+    {
+        for (i = 0; i < (cbNeeded / sizeof(HMODULE)); i++)
+        {
+            TCHAR szModName[MAX_PATH];
+
+            // Get the full path to the module's file.
+
+            if (GetModuleFileNameEx(hProc, hMods[i], szModName,
+                sizeof(szModName) / sizeof(TCHAR)))
+            {
+                // Print the module name and handle value.
+
+                _tprintf(TEXT("\t%s (0x%08X)\n"), szModName, hMods[i]);
+            }
+        }
+    }
+
+    CloseHandle(hProc);
+    return 0;
+}
+
+int main()
+{
+    DWORD processID = GetProcList("ac_client.exe");
+    if (processID != 0) {
+        PrintModules(processID);
+       // ExploitProcessBuffer(processID);
+    }
+
+    return 0;
+}
